@@ -544,12 +544,15 @@ class MotionDetectionService : Service() {
     private fun triggerAlarm(test: Boolean) {
         if (alarmActive || (isSuspended() && !test)) return
         alarmActive = true
-        startSound()
+        val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("alarmSoundEnabled", true)) startSound()
+        if (prefs.getBoolean("flashlightEnabled", false)) startTorchBlink()
         startRedFlash()
         mainHandler.postDelayed({
             if (!alarmActive) return@postDelayed // already dismissed via the floating button
             stopSound()
             stopRedFlash()
+            stopTorchBlink()
             alarmActive = false
             cooldownUntil = System.currentTimeMillis() + if (test) 0 else COOLDOWN_MS
         }, ALARM_DURATION_MS)
@@ -559,12 +562,61 @@ class MotionDetectionService : Service() {
         if (!alarmActive) return
         stopSound()
         stopRedFlash()
+        stopTorchBlink()
         alarmActive = false
+    }
+
+    // ---------------- Flashlight blink ----------------
+
+    private var torchId: String? = null
+    private var torchOn = false
+    private var torchRunnable: Runnable? = null
+
+    private fun startTorchBlink() {
+        if (torchRunnable != null) return
+        val cm = getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+        val id = try {
+            val ids = cm.cameraIdList
+            ids.firstOrNull { cid ->
+                val ch = cm.getCameraCharacteristics(cid)
+                ch.get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true &&
+                    ch.get(android.hardware.camera2.CameraCharacteristics.LENS_FACING) ==
+                    android.hardware.camera2.CameraMetadata.LENS_FACING_BACK
+            } ?: ids.firstOrNull { cid ->
+                cm.getCameraCharacteristics(cid)
+                    .get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            }
+        } catch (_: Exception) { null } ?: return
+
+        torchId = id
+        torchOn = false
+        torchRunnable = object : Runnable {
+            override fun run() {
+                val tid = torchId ?: return
+                torchOn = !torchOn
+                try { cm.setTorchMode(tid, torchOn) } catch (_: Exception) {}
+                mainHandler.postDelayed(this, FLASH_TOGGLE_MS)
+            }
+        }.also { mainHandler.post(it) }
+    }
+
+    private fun stopTorchBlink() {
+        torchRunnable?.let { mainHandler.removeCallbacks(it) }
+        torchRunnable = null
+        torchId?.let {
+            val cm = getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+            try { cm.setTorchMode(it, false) } catch (_: Exception) {}
+        }
+        torchOn = false
+        torchId = null
     }
 
     private fun startSound() {
         try {
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            val savedUri = getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getString("alarmSoundUri", null)
+            val uri = savedUri?.let { android.net.Uri.parse(it) }
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             mediaPlayer = MediaPlayer().apply {
                 setDataSource(this@MotionDetectionService, uri)
@@ -671,6 +723,7 @@ class MotionDetectionService : Service() {
     private fun stopEverything() {
         stopSound()
         stopRedFlash()
+        stopTorchBlink()
         stopAudioDetection()
         removeFloatingButton()
         cancelSnoozeTicker()

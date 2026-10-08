@@ -63,6 +63,23 @@
         android:progress="50"
         android:layout_marginBottom="24dp" />
 
+    <Switch
+        android:id="@+id/alarmSoundSwitch"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Alarm sound"
+        android:textSize="16sp"
+        android:checked="true"
+        android:layout_marginBottom="8dp" />
+
+    <Switch
+        android:id="@+id/flashlightSwitch"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Blink flashlight on alarm"
+        android:textSize="16sp"
+        android:layout_marginBottom="24dp" />
+
     <TextView
         android:id="@+id/snoozeLabel"
         android:layout_width="match_parent"
@@ -77,6 +94,12 @@
         android:max="17"
         android:progress="7"
         android:layout_marginBottom="24dp" />
+
+    <Button
+        android:id="@+id/alarmSoundButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Alarm sound: System default" />
 
     <Button
         android:id="@+id/startButton"

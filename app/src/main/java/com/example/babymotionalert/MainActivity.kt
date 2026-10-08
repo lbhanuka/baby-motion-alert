@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.RingtoneManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -51,6 +52,22 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (!granted) {
                 Toast.makeText(this, "Sound detection needs the microphone permission", Toast.LENGTH_LONG).show()
+            }
+        }
+
+    private val ringtonePickerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                @Suppress("DEPRECATION")
+                val uri: android.net.Uri? =
+                    result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+                val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+                if (uri != null) {
+                    prefs.edit().putString("alarmSoundUri", uri.toString()).apply()
+                } else {
+                    prefs.edit().remove("alarmSoundUri").apply() // back to system default
+                }
+                updateAlarmSoundButton()
             }
         }
 
@@ -116,6 +133,19 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
 
+        // ---- Alarm sound on/off + flashlight ----
+        val alarmSoundSwitch = findViewById<Switch>(R.id.alarmSoundSwitch)
+        alarmSoundSwitch.isChecked = prefs.getBoolean("alarmSoundEnabled", true)
+        alarmSoundSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("alarmSoundEnabled", checked).apply()
+        }
+
+        val flashlightSwitch = findViewById<Switch>(R.id.flashlightSwitch)
+        flashlightSwitch.isChecked = prefs.getBoolean("flashlightEnabled", false)
+        flashlightSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("flashlightEnabled", checked).apply()
+        }
+
         // ---- Attend snooze duration (3..20 min) ----
         val snoozeSeek = findViewById<SeekBar>(R.id.snoozeSeek)
         val snoozeLabel = findViewById<TextView>(R.id.snoozeLabel)
@@ -133,6 +163,21 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
+
+        // ---- Alarm sound picker ----
+        findViewById<Button>(R.id.alarmSoundButton).setOnClickListener {
+            val current = prefs.getString("alarmSoundUri", null)?.let { android.net.Uri.parse(it) }
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+                putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Alarm sound")
+                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+                putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, current)
+            }
+            ringtonePickerLauncher.launch(intent)
+        }
+        updateAlarmSoundButton()
 
         // ---- Buttons ----
         findViewById<Button>(R.id.startButton).setOnClickListener {
@@ -172,6 +217,23 @@ class MainActivity : AppCompatActivity() {
     private fun percentX100ToProgress(x100: Int): Int {
         val p = 50.0 * log10(x100.coerceIn(5, 500) / 5.0)
         return p.roundToInt().coerceIn(0, 100)
+    }
+
+    private fun updateAlarmSoundButton() {
+        val btn = findViewById<Button>(R.id.alarmSoundButton)
+        val saved = getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getString("alarmSoundUri", null)
+        val name = if (saved == null) {
+            "System default"
+        } else {
+            try {
+                RingtoneManager.getRingtone(this, android.net.Uri.parse(saved))
+                    ?.getTitle(this) ?: "Custom"
+            } catch (_: Exception) {
+                "Custom"
+            }
+        }
+        btn.text = "Alarm sound: $name"
     }
 
     private fun labelFor(x100: Int): String {
