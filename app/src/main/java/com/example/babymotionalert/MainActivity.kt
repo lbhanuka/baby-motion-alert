@@ -3,6 +3,7 @@ package com.example.babymotionalert
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -10,10 +11,14 @@ import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import kotlin.math.log10
+import kotlin.math.pow
+import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
 
@@ -33,7 +38,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     startService(svc)
                 }
-                statusText.text = "Status: MONITORING"
+                statusText.text = "Status: ARMING (20s grace, then monitoring)"
             } else {
                 Toast.makeText(this, "Screen capture permission denied", Toast.LENGTH_SHORT).show()
             }
@@ -41,6 +46,13 @@ class MainActivity : AppCompatActivity() {
 
     private val notifPermLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private val audioPermLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted) {
+                Toast.makeText(this, "Sound detection needs the microphone permission", Toast.LENGTH_LONG).show()
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,23 +67,56 @@ class MainActivity : AppCompatActivity() {
 
         val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+        // ---- Motion sensitivity (log scale 0.05% .. 5%) ----
         val sensitivitySeek = findViewById<SeekBar>(R.id.sensitivitySeek)
         val sensitivityLabel = findViewById<TextView>(R.id.sensitivityLabel)
-        // Stored value = % of pixels that must change to trigger, x10 (so 15 = 1.5%)
-        val saved = prefs.getInt("triggerPercentX10", 15)
-        sensitivitySeek.progress = saved
+        val saved = prefs.getInt("triggerPercentX100", 20) // default 0.2%
+        sensitivitySeek.max = 100
+        sensitivitySeek.progress = percentX100ToProgress(saved)
         sensitivityLabel.text = labelFor(saved)
 
         sensitivitySeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
-                val v = value.coerceAtLeast(2) // never allow 0 -> constant alarms
-                sensitivityLabel.text = labelFor(v)
-                prefs.edit().putInt("triggerPercentX10", v).apply()
+                val x100 = progressToPercentX100(value)
+                sensitivityLabel.text = labelFor(x100)
+                prefs.edit().putInt("triggerPercentX100", x100).apply()
             }
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
 
+        // ---- Sound detection ----
+        val soundSwitch = findViewById<Switch>(R.id.soundSwitch)
+        val soundSeek = findViewById<SeekBar>(R.id.soundSeek)
+        val soundLabel = findViewById<TextView>(R.id.soundLabel)
+
+        soundSwitch.isChecked = prefs.getBoolean("soundEnabled", false)
+        val savedSound = prefs.getInt("soundSensitivity", 50)
+        soundSeek.progress = savedSound
+        soundLabel.text = soundLabelFor(savedSound)
+
+        soundSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("soundEnabled", checked).apply()
+            if (checked && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                audioPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+            }
+            if (checked) {
+                Toast.makeText(this, "Applies the next time you press Start", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        soundSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
+                soundLabel.text = soundLabelFor(value)
+                prefs.edit().putInt("soundSensitivity", value).apply()
+            }
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+
+        // ---- Buttons ----
         findViewById<Button>(R.id.startButton).setOnClickListener {
             if (!Settings.canDrawOverlays(this)) {
                 Toast.makeText(this, "Allow 'Display over other apps' first", Toast.LENGTH_LONG).show()
@@ -100,8 +145,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun labelFor(vX10: Int): String {
-        val pct = vX10 / 10.0
-        return "Trigger threshold: $pct% of screen changed (lower = more sensitive)"
+    // slider 0..100  ->  percentX100 5..500 (log scale)
+    private fun progressToPercentX100(progress: Int): Int {
+        val x100 = 5.0 * 10.0.pow(progress / 50.0)
+        return x100.roundToInt().coerceIn(5, 500)
+    }
+
+    private fun percentX100ToProgress(x100: Int): Int {
+        val p = 50.0 * log10(x100.coerceIn(5, 500) / 5.0)
+        return p.roundToInt().coerceIn(0, 100)
+    }
+
+    private fun labelFor(x100: Int): String {
+        val pct = x100 / 100.0
+        return "Trigger threshold: %.2f%% of screen changed (lower = more sensitive)".format(pct)
+    }
+
+    private fun soundLabelFor(value: Int): String {
+        return "Sound sensitivity: $value/100 (higher = triggers on quieter sounds)"
     }
 }

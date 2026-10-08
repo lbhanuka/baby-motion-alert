@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
+    android:layout_height="match_parent">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
     android:orientation="vertical"
     android:padding="24dp"
     android:gravity="center_horizontal">
@@ -17,7 +21,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Open your baby cam app in full screen after starting. This app watches the screen and alarms on movement."
+        android:text="Open your baby cam app in full screen after starting. This app watches the screen (and optionally its sound) and alarms on movement or crying."
         android:textSize="14sp"
         android:layout_marginBottom="24dp" />
 
@@ -33,7 +37,30 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:max="100"
-        android:progress="15"
+        android:progress="30"
+        android:layout_marginBottom="24dp" />
+
+    <Switch
+        android:id="@+id/soundSwitch"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Sound detection (crying)"
+        android:textSize="16sp"
+        android:layout_marginBottom="8dp" />
+
+    <TextView
+        android:id="@+id/soundLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Sound sensitivity"
+        android:textSize="14sp" />
+
+    <SeekBar
+        android:id="@+id/soundSeek"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="100"
+        android:progress="50"
         android:layout_marginBottom="24dp" />
 
     <Button
@@ -62,3 +89,4 @@
         android:layout_marginTop="24dp"
         android:textSize="16sp" />
 </LinearLayout>
+</ScrollView>
