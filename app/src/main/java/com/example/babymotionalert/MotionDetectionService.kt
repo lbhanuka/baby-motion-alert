@@ -57,10 +57,11 @@ class MotionDetectionService : Service() {
         private const val PIXEL_DIFF_THRESHOLD = 28    // luminance delta (0-255) to count a pixel as "changed"
         private const val WARMUP_FRAMES = 5            // ignore first frames after start
         private const val GRACE_PERIOD_MS = 20000L     // time to switch to the camera app before detection arms
-        private const val RESUME_GRACE_MS = 5000L      // short grace after tapping resume
+        private const val RESUME_GRACE_MS = 5000L      // short grace after resuming from pause/snooze
         private const val ALARM_DURATION_MS = 5000L    // how long the beep + red flash lasts
         private const val COOLDOWN_MS = 8000L          // silence period after an alarm ends
         private const val FLASH_TOGGLE_MS = 250L       // red overlay blink rate during alarm
+        private const val LONG_PRESS_MS = 600L         // hold the floating button this long = indefinite pause
 
         // --- Sound detection tuning ---
         private const val AUDIO_SAMPLE_RATE = 16000
@@ -83,8 +84,12 @@ class MotionDetectionService : Service() {
     private var cooldownUntil = 0L
     private var armedFlashRunnable: Runnable? = null
 
+    // Suspension state: indefinite pause (long-press) or timed snooze ("attending mode")
     @Volatile
-    private var paused = false
+    private var pausedIndefinitely = false
+    @Volatile
+    private var snoozeUntil = 0L
+    private var snoozeTicker: Runnable? = null
 
     private var audioRecord: AudioRecord? = null
     private var audioThread: Thread? = null
@@ -100,6 +105,9 @@ class MotionDetectionService : Service() {
             stopSelf()
         }
     }
+
+    private fun isSuspended(): Boolean =
+        pausedIndefinitely || System.currentTimeMillis() < snoozeUntil
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -186,7 +194,8 @@ class MotionDetectionService : Service() {
 
         prevLuma = null
         framesSeen = 0
-        paused = false
+        pausedIndefinitely = false
+        snoozeUntil = 0L
 
         // Grace period: no alarms until it elapses, so you can switch to the camera app.
         cooldownUntil = System.currentTimeMillis() + GRACE_PERIOD_MS
@@ -194,7 +203,7 @@ class MotionDetectionService : Service() {
         // Sound detection (captures the audio the camera app plays, not the room)
         startAudioDetection(projection)
 
-        // Floating pause/resume button, visible on top of other apps
+        // Floating pause/snooze button, visible on top of other apps
         mainHandler.post { addFloatingButton() }
 
         // Silent confirmation blink now ("monitoring started")...
@@ -202,11 +211,11 @@ class MotionDetectionService : Service() {
 
         // ...and another silent blink when detection actually arms.
         armedFlashRunnable = Runnable {
-            if (mediaProjection != null && !paused) silentBlink(times = 2)
+            if (mediaProjection != null && !isSuspended()) silentBlink(times = 2)
         }.also { mainHandler.postDelayed(it, GRACE_PERIOD_MS) }
     }
 
-    // ---------------- Floating pause/resume button ----------------
+    // ---------------- Floating button: tap = snooze/resume, long-press = pause ----------------
 
     private fun addFloatingButton() {
         if (floatingButton != null) return
@@ -217,7 +226,6 @@ class MotionDetectionService : Service() {
 
         val button = TextView(this).apply {
             gravity = Gravity.CENTER
-            textSize = 22f
             setTextColor(Color.WHITE)
         }
 
@@ -240,7 +248,9 @@ class MotionDetectionService : Service() {
         var startX = 0
         var startY = 0
         var moved = false
+        var longPressed = false
         val touchSlop = (8 * density)
+        var longPressRunnable: Runnable? = null
 
         button.setOnTouchListener { v, e ->
             when (e.actionMasked) {
@@ -248,12 +258,20 @@ class MotionDetectionService : Service() {
                     downX = e.rawX; downY = e.rawY
                     startX = params.x; startY = params.y
                     moved = false
+                    longPressed = false
+                    longPressRunnable = Runnable {
+                        longPressed = true
+                        onLongPress()
+                    }.also { mainHandler.postDelayed(it, LONG_PRESS_MS) }
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - downX
                     val dy = e.rawY - downY
-                    if (abs(dx) > touchSlop || abs(dy) > touchSlop) moved = true
+                    if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
+                        moved = true
+                        longPressRunnable?.let { mainHandler.removeCallbacks(it) }
+                    }
                     if (moved) {
                         params.x = startX + dx.toInt()
                         params.y = startY + dy.toInt()
@@ -261,8 +279,9 @@ class MotionDetectionService : Service() {
                     }
                     true
                 }
-                MotionEvent.ACTION_UP -> {
-                    if (!moved) togglePause()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    longPressRunnable?.let { mainHandler.removeCallbacks(it) }
+                    if (e.actionMasked == MotionEvent.ACTION_UP && !moved && !longPressed) onTap()
                     true
                 }
                 else -> false
@@ -278,33 +297,98 @@ class MotionDetectionService : Service() {
         }
     }
 
-    private fun styleFloatingButton() {
-        val button = floatingButton ?: return
-        val bg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(if (paused) Color.argb(220, 230, 150, 0) else Color.argb(200, 0, 150, 70))
+    /** Tap: armed -> snooze (attending); snoozing/paused -> re-arm. Also dismisses a ringing alarm. */
+    private fun onTap() {
+        if (mediaProjection == null) return
+        when {
+            pausedIndefinitely || System.currentTimeMillis() < snoozeUntil -> resumeMonitoring()
+            else -> startSnooze()
         }
-        button.background = bg
-        button.text = if (paused) "\u25B6" else "\u23F8"  // play / pause glyphs
     }
 
-    private fun togglePause() {
+    /** Long-press: indefinite pause (until tapped). Also dismisses a ringing alarm. */
+    private fun onLongPress() {
         if (mediaProjection == null) return
-        if (!paused) {
-            // PAUSE: stop detecting, and silence any alarm currently ringing.
-            paused = true
-            stopSound()
-            stopRedFlash()
-            alarmActive = false
-        } else {
-            // RESUME: short grace so the tap itself can't trigger, then a silent blink when armed.
-            paused = false
-            cooldownUntil = System.currentTimeMillis() + RESUME_GRACE_MS
-            mainHandler.postDelayed({
-                if (mediaProjection != null && !paused) silentBlink(times = 1)
-            }, RESUME_GRACE_MS)
-        }
+        dismissAlarm()
+        cancelSnoozeTicker()
+        snoozeUntil = 0L
+        pausedIndefinitely = true
         styleFloatingButton()
+    }
+
+    private fun startSnooze() {
+        dismissAlarm()
+        pausedIndefinitely = false
+        val minutes = getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getInt("snoozeMinutes", 10).coerceIn(3, 20)
+        snoozeUntil = System.currentTimeMillis() + minutes * 60_000L
+        startSnoozeTicker()
+        styleFloatingButton()
+    }
+
+    private fun resumeMonitoring() {
+        dismissAlarm()
+        cancelSnoozeTicker()
+        pausedIndefinitely = false
+        snoozeUntil = 0L
+        cooldownUntil = System.currentTimeMillis() + RESUME_GRACE_MS
+        mainHandler.postDelayed({
+            if (mediaProjection != null && !isSuspended()) silentBlink(times = 1)
+        }, RESUME_GRACE_MS)
+        styleFloatingButton()
+    }
+
+    private fun startSnoozeTicker() {
+        cancelSnoozeTicker()
+        snoozeTicker = object : Runnable {
+            override fun run() {
+                if (mediaProjection == null) return
+                val remaining = snoozeUntil - System.currentTimeMillis()
+                if (remaining <= 0) {
+                    // Snooze over -> auto re-arm with a confirmation blink
+                    snoozeUntil = 0L
+                    snoozeTicker = null
+                    cooldownUntil = System.currentTimeMillis() + RESUME_GRACE_MS
+                    mainHandler.postDelayed({
+                        if (mediaProjection != null && !isSuspended()) silentBlink(times = 1)
+                    }, RESUME_GRACE_MS)
+                    styleFloatingButton()
+                } else {
+                    styleFloatingButton()
+                    mainHandler.postDelayed(this, 1000L)
+                }
+            }
+        }.also { mainHandler.postDelayed(it, 0L) }
+    }
+
+    private fun cancelSnoozeTicker() {
+        snoozeTicker?.let { mainHandler.removeCallbacks(it) }
+        snoozeTicker = null
+    }
+
+    private fun styleFloatingButton() {
+        val button = floatingButton ?: return
+        val now = System.currentTimeMillis()
+        val bg = GradientDrawable().apply { shape = GradientDrawable.OVAL }
+        when {
+            pausedIndefinitely -> {
+                bg.setColor(Color.argb(220, 110, 110, 110))
+                button.textSize = 22f
+                button.text = "\u25B6" // play
+            }
+            now < snoozeUntil -> {
+                bg.setColor(Color.argb(230, 230, 150, 0))
+                button.textSize = 13f
+                val secs = ((snoozeUntil - now) / 1000L).coerceAtLeast(0)
+                button.text = "%d:%02d".format(secs / 60, secs % 60)
+            }
+            else -> {
+                bg.setColor(Color.argb(200, 0, 150, 70))
+                button.textSize = 22f
+                button.text = "\u23F8" // pause
+            }
+        }
+        button.background = bg
     }
 
     private fun removeFloatingButton() {
@@ -366,7 +450,7 @@ class MotionDetectionService : Service() {
                 if (n < 0) break
                 if (n == 0) continue
 
-                if (paused) { loudChunks = 0; continue }
+                if (isSuspended()) { loudChunks = 0; continue }
 
                 var sum = 0.0
                 for (i in 0 until n) {
@@ -435,7 +519,7 @@ class MotionDetectionService : Service() {
         prevLuma = luma
 
         if (prev == null || prev.size != luma.size || framesSeen <= WARMUP_FRAMES) return
-        if (paused || alarmActive) return
+        if (isSuspended() || alarmActive) return
         val now = System.currentTimeMillis()
         if (now < cooldownUntil) return
 
@@ -458,17 +542,24 @@ class MotionDetectionService : Service() {
     // ---------------- Alarm + red flash ----------------
 
     private fun triggerAlarm(test: Boolean) {
-        if (alarmActive || (paused && !test)) return
+        if (alarmActive || (isSuspended() && !test)) return
         alarmActive = true
         startSound()
         startRedFlash()
         mainHandler.postDelayed({
-            if (!alarmActive) return@postDelayed // already dismissed via pause
+            if (!alarmActive) return@postDelayed // already dismissed via the floating button
             stopSound()
             stopRedFlash()
             alarmActive = false
             cooldownUntil = System.currentTimeMillis() + if (test) 0 else COOLDOWN_MS
         }, ALARM_DURATION_MS)
+    }
+
+    private fun dismissAlarm() {
+        if (!alarmActive) return
+        stopSound()
+        stopRedFlash()
+        alarmActive = false
     }
 
     private fun startSound() {
@@ -582,8 +673,10 @@ class MotionDetectionService : Service() {
         stopRedFlash()
         stopAudioDetection()
         removeFloatingButton()
+        cancelSnoozeTicker()
         alarmActive = false
-        paused = false
+        pausedIndefinitely = false
+        snoozeUntil = 0L
         armedFlashRunnable?.let { mainHandler.removeCallbacks(it) }
         armedFlashRunnable = null
         virtualDisplay?.release(); virtualDisplay = null

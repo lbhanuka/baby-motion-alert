@@ -116,6 +116,24 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
 
+        // ---- Attend snooze duration (3..20 min) ----
+        val snoozeSeek = findViewById<SeekBar>(R.id.snoozeSeek)
+        val snoozeLabel = findViewById<TextView>(R.id.snoozeLabel)
+        val savedSnooze = prefs.getInt("snoozeMinutes", 10).coerceIn(3, 20)
+        snoozeSeek.max = 17 // 0..17 -> 3..20 min
+        snoozeSeek.progress = savedSnooze - 3
+        snoozeLabel.text = snoozeLabelFor(savedSnooze)
+
+        snoozeSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
+                val minutes = value + 3
+                snoozeLabel.text = snoozeLabelFor(minutes)
+                prefs.edit().putInt("snoozeMinutes", minutes).apply()
+            }
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+
         // ---- Buttons ----
         findViewById<Button>(R.id.startButton).setOnClickListener {
             if (!Settings.canDrawOverlays(this)) {
@@ -163,5 +181,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun soundLabelFor(value: Int): String {
         return "Sound sensitivity: $value/100 (higher = triggers on quieter sounds)"
+    }
+
+    private fun snoozeLabelFor(minutes: Int): String {
+        return "Attend snooze: $minutes min (tap floating button when attending; auto re-arms)"
     }
 }

@@ -21,7 +21,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Open your baby cam app in full screen after starting. This app watches the screen (and optionally its sound) and alarms on movement or crying."
+        android:text="Open your baby cam app in full screen after starting. This app watches the screen (and optionally its sound) and alarms on movement or crying. Floating button: tap = attend snooze / re-arm, hold = pause."
         android:textSize="14sp"
         android:layout_marginBottom="24dp" />
 
@@ -61,6 +61,21 @@
         android:layout_height="wrap_content"
         android:max="100"
         android:progress="50"
+        android:layout_marginBottom="24dp" />
+
+    <TextView
+        android:id="@+id/snoozeLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Attend snooze"
+        android:textSize="14sp" />
+
+    <SeekBar
+        android:id="@+id/snoozeSeek"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="17"
+        android:progress="7"
         android:layout_marginBottom="24dp" />
 
     <Button
