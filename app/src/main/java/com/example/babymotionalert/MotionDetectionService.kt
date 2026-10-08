@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.AudioAttributes
@@ -29,9 +30,12 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.sqrt
 
@@ -53,6 +57,7 @@ class MotionDetectionService : Service() {
         private const val PIXEL_DIFF_THRESHOLD = 28    // luminance delta (0-255) to count a pixel as "changed"
         private const val WARMUP_FRAMES = 5            // ignore first frames after start
         private const val GRACE_PERIOD_MS = 20000L     // time to switch to the camera app before detection arms
+        private const val RESUME_GRACE_MS = 5000L      // short grace after tapping resume
         private const val ALARM_DURATION_MS = 5000L    // how long the beep + red flash lasts
         private const val COOLDOWN_MS = 8000L          // silence period after an alarm ends
         private const val FLASH_TOGGLE_MS = 250L       // red overlay blink rate during alarm
@@ -78,10 +83,14 @@ class MotionDetectionService : Service() {
     private var cooldownUntil = 0L
     private var armedFlashRunnable: Runnable? = null
 
+    @Volatile
+    private var paused = false
+
     private var audioRecord: AudioRecord? = null
     private var audioThread: Thread? = null
 
     private var overlayView: View? = null
+    private var floatingButton: TextView? = null
     private var mediaPlayer: MediaPlayer? = null
 
     private val projectionCallback = object : MediaProjection.Callback() {
@@ -177,6 +186,7 @@ class MotionDetectionService : Service() {
 
         prevLuma = null
         framesSeen = 0
+        paused = false
 
         // Grace period: no alarms until it elapses, so you can switch to the camera app.
         cooldownUntil = System.currentTimeMillis() + GRACE_PERIOD_MS
@@ -184,13 +194,125 @@ class MotionDetectionService : Service() {
         // Sound detection (captures the audio the camera app plays, not the room)
         startAudioDetection(projection)
 
+        // Floating pause/resume button, visible on top of other apps
+        mainHandler.post { addFloatingButton() }
+
         // Silent confirmation blink now ("monitoring started")...
         mainHandler.post { silentBlink(times = 2) }
 
         // ...and another silent blink when detection actually arms.
         armedFlashRunnable = Runnable {
-            if (mediaProjection != null) silentBlink(times = 2)
+            if (mediaProjection != null && !paused) silentBlink(times = 2)
         }.also { mainHandler.postDelayed(it, GRACE_PERIOD_MS) }
+    }
+
+    // ---------------- Floating pause/resume button ----------------
+
+    private fun addFloatingButton() {
+        if (floatingButton != null) return
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        val density = resources.displayMetrics.density
+        val sizePx = (56 * density).toInt()
+
+        val button = TextView(this).apply {
+            gravity = Gravity.CENTER
+            textSize = 22f
+            setTextColor(Color.WHITE)
+        }
+
+        val params = WindowManager.LayoutParams(
+            sizePx, sizePx,
+            if (Build.VERSION.SDK_INT >= 26)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (12 * density).toInt()
+            y = resources.displayMetrics.heightPixels / 3
+        }
+
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        var moved = false
+        val touchSlop = (8 * density)
+
+        button.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX; downY = e.rawY
+                    startX = params.x; startY = params.y
+                    moved = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX
+                    val dy = e.rawY - downY
+                    if (abs(dx) > touchSlop || abs(dy) > touchSlop) moved = true
+                    if (moved) {
+                        params.x = startX + dx.toInt()
+                        params.y = startY + dy.toInt()
+                        try { wm.updateViewLayout(v, params) } catch (_: Exception) {}
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) togglePause()
+                    true
+                }
+                else -> false
+            }
+        }
+
+        try {
+            wm.addView(button, params)
+            floatingButton = button
+            styleFloatingButton()
+        } catch (_: Exception) {
+            floatingButton = null
+        }
+    }
+
+    private fun styleFloatingButton() {
+        val button = floatingButton ?: return
+        val bg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(if (paused) Color.argb(220, 230, 150, 0) else Color.argb(200, 0, 150, 70))
+        }
+        button.background = bg
+        button.text = if (paused) "\u25B6" else "\u23F8"  // play / pause glyphs
+    }
+
+    private fun togglePause() {
+        if (mediaProjection == null) return
+        if (!paused) {
+            // PAUSE: stop detecting, and silence any alarm currently ringing.
+            paused = true
+            stopSound()
+            stopRedFlash()
+            alarmActive = false
+        } else {
+            // RESUME: short grace so the tap itself can't trigger, then a silent blink when armed.
+            paused = false
+            cooldownUntil = System.currentTimeMillis() + RESUME_GRACE_MS
+            mainHandler.postDelayed({
+                if (mediaProjection != null && !paused) silentBlink(times = 1)
+            }, RESUME_GRACE_MS)
+        }
+        styleFloatingButton()
+    }
+
+    private fun removeFloatingButton() {
+        floatingButton?.let {
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            try { wm.removeView(it) } catch (_: Exception) {}
+        }
+        floatingButton = null
     }
 
     // ---------------- Sound detection (playback capture) ----------------
@@ -243,6 +365,8 @@ class MotionDetectionService : Service() {
                 val n = try { rec.read(chunk, 0, chunk.size) } catch (_: Exception) { -1 }
                 if (n < 0) break
                 if (n == 0) continue
+
+                if (paused) { loudChunks = 0; continue }
 
                 var sum = 0.0
                 for (i in 0 until n) {
@@ -311,7 +435,7 @@ class MotionDetectionService : Service() {
         prevLuma = luma
 
         if (prev == null || prev.size != luma.size || framesSeen <= WARMUP_FRAMES) return
-        if (alarmActive) return
+        if (paused || alarmActive) return
         val now = System.currentTimeMillis()
         if (now < cooldownUntil) return
 
@@ -334,11 +458,12 @@ class MotionDetectionService : Service() {
     // ---------------- Alarm + red flash ----------------
 
     private fun triggerAlarm(test: Boolean) {
-        if (alarmActive) return
+        if (alarmActive || (paused && !test)) return
         alarmActive = true
         startSound()
         startRedFlash()
         mainHandler.postDelayed({
+            if (!alarmActive) return@postDelayed // already dismissed via pause
             stopSound()
             stopRedFlash()
             alarmActive = false
@@ -456,7 +581,9 @@ class MotionDetectionService : Service() {
         stopSound()
         stopRedFlash()
         stopAudioDetection()
+        removeFloatingButton()
         alarmActive = false
+        paused = false
         armedFlashRunnable?.let { mainHandler.removeCallbacks(it) }
         armedFlashRunnable = null
         virtualDisplay?.release(); virtualDisplay = null
