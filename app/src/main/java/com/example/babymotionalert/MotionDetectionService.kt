@@ -640,12 +640,20 @@ class MotionDetectionService : Service() {
             rec.release(); clapRecord = null; return
         }
 
+        val debug = prefs.getBoolean("clapDebugEnabled", false)
+
         clapThread = Thread {
             val chunk = ShortArray(sr / 20) // 50 ms
             var floor = 500.0
             var prevSpike = false
             var lastClapAt = 0L
             var chunksSeen = 0
+            var detected = false
+            val windowStart = System.currentTimeMillis()
+            val pcm = if (debug) java.io.ByteArrayOutputStream() else null
+            val log = if (debug) StringBuilder("ms,rms,peak,floor,spike,edge\n") else null
+            val pcmCap = sr * 2 * 60 // at most 60 s of audio per window
+
             while (!Thread.currentThread().isInterrupted && clapRecord === rec) {
                 val n = try { rec.read(chunk, 0, chunk.size) } catch (_: Exception) { -1 }
                 if (n < 0) break
@@ -662,15 +670,32 @@ class MotionDetectionService : Service() {
                 val rms = sqrt(sum / n)
                 chunksSeen++
 
+                if (pcm != null && pcm.size() < pcmCap) {
+                    for (i in 0 until n) {
+                        val v = chunk[i].toInt()
+                        pcm.write(v and 0xFF)
+                        pcm.write((v shr 8) and 0xFF)
+                    }
+                }
+
                 val isSpike = chunksSeen > 4 &&
                     peak > CLAP_PEAK_MIN &&
                     rms > floor * CLAP_FLOOR_FACTOR
                 if (!isSpike) floor = 0.9 * floor + 0.1 * rms // adapt floor on quiet chunks only
 
-                if (isSpike && !prevSpike) { // rising edge = one clap
+                val edge = isSpike && !prevSpike // rising edge = one clap
+                log?.append(System.currentTimeMillis() - windowStart)?.append(',')
+                    ?.append(rms.toInt())?.append(',')?.append(peak)?.append(',')
+                    ?.append(floor.toInt())?.append(',')
+                    ?.append(if (isSpike) 1 else 0)?.append(',')
+                    ?.append(if (edge) 1 else 0)?.append('\n')
+
+                if (edge) {
+                    mainHandler.post { clapFeedbackBlink() } // green flash: clap registered
                     val now = System.currentTimeMillis()
                     val gap = now - lastClapAt
                     if (lastClapAt != 0L && gap in CLAP_GAP_MIN_MS..CLAP_GAP_MAX_MS) {
+                        detected = true
                         mainHandler.post { startSnooze() }
                         break
                     }
@@ -678,9 +703,76 @@ class MotionDetectionService : Service() {
                 }
                 prevSpike = isSpike
             }
+
+            if (pcm != null && log != null && pcm.size() > 0) {
+                writeClapDump(pcm.toByteArray(), log.toString(), detected)
+            }
         }.also {
             it.name = "clap-detect"
             it.start()
+        }
+    }
+
+    /** Brief GREEN flash: one clap was registered (clap again to snooze). */
+    private fun clapFeedbackBlink() {
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val view = View(this).apply {
+            setBackgroundColor(Color.argb(150, 0, 220, 90))
+        }
+        try {
+            wm.addView(view, overlayParams())
+        } catch (_: Exception) {
+            return
+        }
+        mainHandler.postDelayed({
+            try { wm.removeView(view) } catch (_: Exception) {}
+        }, 250L)
+    }
+
+    private fun writeClapDump(pcm: ByteArray, log: String, detected: Boolean) {
+        try {
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                .format(java.util.Date())
+            val base = "clap_" + stamp + if (detected) "_detected" else "_missed"
+            saveToDownloads("$base.wav", "audio/wav", wavBytes(pcm, AUDIO_SAMPLE_RATE))
+            saveToDownloads("$base.csv", "text/csv", log.toByteArray())
+            mainHandler.post {
+                android.widget.Toast.makeText(
+                    this,
+                    "Clap debug saved: Downloads/BabyMotionAlert/$base",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun wavBytes(pcm: ByteArray, sampleRate: Int): ByteArray {
+        val bb = java.nio.ByteBuffer.allocate(44 + pcm.size)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        bb.put("RIFF".toByteArray()); bb.putInt(36 + pcm.size); bb.put("WAVE".toByteArray())
+        bb.put("fmt ".toByteArray()); bb.putInt(16); bb.putShort(1); bb.putShort(1)
+        bb.putInt(sampleRate); bb.putInt(sampleRate * 2); bb.putShort(2); bb.putShort(16)
+        bb.put("data".toByteArray()); bb.putInt(pcm.size); bb.put(pcm)
+        return bb.array()
+    }
+
+    private fun saveToDownloads(name: String, mime: String, data: ByteArray) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(
+                    android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                    android.os.Environment.DIRECTORY_DOWNLOADS + "/BabyMotionAlert"
+                )
+            }
+            val uri = contentResolver.insert(
+                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
+            ) ?: return
+            contentResolver.openOutputStream(uri)?.use { it.write(data) }
+        } else {
+            val dir = java.io.File(getExternalFilesDir(null), "clapdebug").apply { mkdirs() }
+            java.io.File(dir, name).writeBytes(data)
         }
     }
 

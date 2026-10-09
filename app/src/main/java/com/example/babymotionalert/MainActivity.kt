@@ -158,6 +158,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // ---- Clap debug recording ----
+        val clapDebugSwitch = findViewById<Switch>(R.id.clapDebugSwitch)
+        clapDebugSwitch.isChecked = prefs.getBoolean("clapDebugEnabled", false)
+        clapDebugSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("clapDebugEnabled", checked).apply()
+        }
+
         // ---- Attend snooze duration (3..20 min) ----
         val snoozeSeek = findViewById<SeekBar>(R.id.snoozeSeek)
         val snoozeLabel = findViewById<TextView>(R.id.snoozeLabel)

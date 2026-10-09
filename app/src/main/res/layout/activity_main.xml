@@ -89,6 +89,14 @@
         android:checked="true"
         android:layout_marginBottom="24dp" />
 
+    <Switch
+        android:id="@+id/clapDebugSwitch"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Clap debug recording (saves WAV+CSV to Downloads)"
+        android:textSize="16sp"
+        android:layout_marginBottom="24dp" />
+
     <TextView
         android:id="@+id/snoozeLabel"
         android:layout_width="match_parent"
