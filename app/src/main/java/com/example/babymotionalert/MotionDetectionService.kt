@@ -21,6 +21,7 @@ import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.ImageReader
 import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.media.RingtoneManager
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -67,6 +68,13 @@ class MotionDetectionService : Service() {
         @Volatile
         @JvmStatic
         var suppressUntil: Long = 0L
+
+        // --- Double-clap snooze tuning ---
+        private const val CLAP_PEAK_MIN = 7000       // 16-bit peak a clap must exceed
+        private const val CLAP_FLOOR_FACTOR = 3.0    // ...and this many times the ambient RMS floor
+        private const val CLAP_GAP_MIN_MS = 180L     // two claps this far apart...
+        private const val CLAP_GAP_MAX_MS = 1500L    // ...but no further -> snooze
+        private const val CLAP_AFTER_ALARM_MS = 10000L // keep listening this long after the ring stops
 
         // --- Sound detection tuning ---
         private const val AUDIO_SAMPLE_RATE = 16000
@@ -156,7 +164,13 @@ class MotionDetectionService : Service() {
             .setOngoing(true)
             .build()
 
-        if (Build.VERSION.SDK_INT >= 29) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            startForeground(
+                NOTIF_ID, notif,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } else if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
             startForeground(NOTIF_ID, notif)
@@ -552,23 +566,134 @@ class MotionDetectionService : Service() {
         val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
         if (prefs.getBoolean("alarmSoundEnabled", true)) startSound()
         if (prefs.getBoolean("flashlightEnabled", false)) startTorchBlink()
+        clapStopRunnable?.let { mainHandler.removeCallbacks(it) }
+        clapStopRunnable = null
+        startClapListener()
         startRedFlash()
         mainHandler.postDelayed({
             if (!alarmActive) return@postDelayed // already dismissed via the floating button
             stopSound()
             stopRedFlash()
             stopTorchBlink()
+            // Alarm timed out unacknowledged: keep the clap listener alive a little
+            // longer so a late double-clap still snoozes before the next alarm.
+            clapStopRunnable = Runnable {
+                clapStopRunnable = null
+                stopClapListener()
+            }.also { mainHandler.postDelayed(it, CLAP_AFTER_ALARM_MS) }
             alarmActive = false
             cooldownUntil = System.currentTimeMillis() + if (test) 0 else COOLDOWN_MS
         }, ALARM_DURATION_MS)
     }
 
     private fun dismissAlarm() {
+        clapStopRunnable?.let { mainHandler.removeCallbacks(it) }
+        clapStopRunnable = null
+        stopClapListener()
         if (!alarmActive) return
         stopSound()
         stopRedFlash()
         stopTorchBlink()
         alarmActive = false
+    }
+
+    // ---------------- Double-clap snooze (mic, only while alarm rings) ----------------
+
+    private var clapRecord: AudioRecord? = null
+    private var clapThread: Thread? = null
+    private var clapAec: android.media.audiofx.AcousticEchoCanceler? = null
+    private var clapStopRunnable: Runnable? = null
+
+    private fun startClapListener() {
+        if (clapThread != null) return
+        val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("clapSnoozeEnabled", true)) return
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) return
+
+        val sr = AUDIO_SAMPLE_RATE
+        val minBuf = AudioRecord.getMinBufferSize(
+            sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+        )
+        val rec = try {
+            @Suppress("MissingPermission")
+            AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION, sr,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minBuf, sr / 2) * 2
+            )
+        } catch (_: Exception) { null } ?: return
+        if (rec.state != AudioRecord.STATE_INITIALIZED) { rec.release(); return }
+
+        // VOICE_COMMUNICATION + AEC cancels the alarm this phone is playing,
+        // so claps from the room stand out.
+        try {
+            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                clapAec = android.media.audiofx.AcousticEchoCanceler
+                    .create(rec.audioSessionId)?.apply { enabled = true }
+            }
+        } catch (_: Exception) {}
+
+        clapRecord = rec
+        try { rec.startRecording() } catch (_: Exception) {
+            rec.release(); clapRecord = null; return
+        }
+
+        clapThread = Thread {
+            val chunk = ShortArray(sr / 20) // 50 ms
+            var floor = 500.0
+            var prevSpike = false
+            var lastClapAt = 0L
+            var chunksSeen = 0
+            while (!Thread.currentThread().isInterrupted && clapRecord === rec) {
+                val n = try { rec.read(chunk, 0, chunk.size) } catch (_: Exception) { -1 }
+                if (n < 0) break
+                if (n == 0) continue
+
+                var sum = 0.0
+                var peak = 0
+                for (i in 0 until n) {
+                    val v = chunk[i].toInt()
+                    val a = abs(v)
+                    if (a > peak) peak = a
+                    sum += v.toDouble() * v
+                }
+                val rms = sqrt(sum / n)
+                chunksSeen++
+
+                val isSpike = chunksSeen > 4 &&
+                    peak > CLAP_PEAK_MIN &&
+                    rms > floor * CLAP_FLOOR_FACTOR
+                if (!isSpike) floor = 0.9 * floor + 0.1 * rms // adapt floor on quiet chunks only
+
+                if (isSpike && !prevSpike) { // rising edge = one clap
+                    val now = System.currentTimeMillis()
+                    val gap = now - lastClapAt
+                    if (lastClapAt != 0L && gap in CLAP_GAP_MIN_MS..CLAP_GAP_MAX_MS) {
+                        mainHandler.post { startSnooze() }
+                        break
+                    }
+                    lastClapAt = now
+                }
+                prevSpike = isSpike
+            }
+        }.also {
+            it.name = "clap-detect"
+            it.start()
+        }
+    }
+
+    private fun stopClapListener() {
+        clapThread?.interrupt()
+        clapThread = null
+        clapAec?.let { try { it.release() } catch (_: Exception) {} }
+        clapAec = null
+        clapRecord?.let {
+            try { it.stop() } catch (_: Exception) {}
+            it.release()
+        }
+        clapRecord = null
     }
 
     // ---------------- Flashlight blink ----------------
@@ -729,6 +854,9 @@ class MotionDetectionService : Service() {
         stopSound()
         stopRedFlash()
         stopTorchBlink()
+        clapStopRunnable?.let { mainHandler.removeCallbacks(it) }
+        clapStopRunnable = null
+        stopClapListener()
         stopAudioDetection()
         removeFloatingButton()
         cancelSnoozeTicker()

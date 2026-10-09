@@ -146,6 +146,18 @@ class MainActivity : AppCompatActivity() {
             prefs.edit().putBoolean("flashlightEnabled", checked).apply()
         }
 
+        // ---- Double-clap snooze ----
+        val clapSwitch = findViewById<Switch>(R.id.clapSwitch)
+        clapSwitch.isChecked = prefs.getBoolean("clapSnoozeEnabled", true)
+        clapSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("clapSnoozeEnabled", checked).apply()
+            if (checked && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                audioPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+            }
+        }
+
         // ---- Attend snooze duration (3..20 min) ----
         val snoozeSeek = findViewById<SeekBar>(R.id.snoozeSeek)
         val snoozeLabel = findViewById<TextView>(R.id.snoozeLabel)

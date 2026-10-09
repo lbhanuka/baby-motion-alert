@@ -80,6 +80,15 @@
         android:textSize="16sp"
         android:layout_marginBottom="24dp" />
 
+    <Switch
+        android:id="@+id/clapSwitch"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Double-clap to snooze (while alarm rings)"
+        android:textSize="16sp"
+        android:checked="true"
+        android:layout_marginBottom="24dp" />
+
     <TextView
         android:id="@+id/snoozeLabel"
         android:layout_width="match_parent"
