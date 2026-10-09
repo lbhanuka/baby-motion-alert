@@ -564,19 +564,27 @@ class MotionDetectionService : Service() {
         if (alarmActive || (isSuspended() && !test)) return
         alarmActive = true
         val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
-        if (prefs.getBoolean("alarmSoundEnabled", true)) startSound()
-        if (prefs.getBoolean("flashlightEnabled", false)) startTorchBlink()
+        val soundOn = prefs.getBoolean("alarmSoundEnabled", true)
         clapStopRunnable?.let { mainHandler.removeCallbacks(it) }
         clapStopRunnable = null
-        startClapListener()
+        if (soundOn) {
+            // The raw mic hears our own alarm as "claps", so close the listener
+            // BEFORE the ring starts; it reopens the moment the ring ends.
+            stopClapListener()
+            startSound()
+        } else {
+            startClapListener() // silent alarm: listen the whole time
+        }
+        if (prefs.getBoolean("flashlightEnabled", false)) startTorchBlink()
         startRedFlash()
         mainHandler.postDelayed({
             if (!alarmActive) return@postDelayed // already dismissed via the floating button
             stopSound()
             stopRedFlash()
             stopTorchBlink()
-            // Alarm timed out unacknowledged: keep the clap listener alive a little
-            // longer so a late double-clap still snoozes before the next alarm.
+            // Ring over -> NOW open the clap window for the quiet tail, so our own
+            // alarm sound can never snooze itself.
+            startClapListener()
             clapStopRunnable = Runnable {
                 clapStopRunnable = null
                 stopClapListener()
@@ -603,6 +611,7 @@ class MotionDetectionService : Service() {
     private var clapThread: Thread? = null
     private var clapAec: android.media.audiofx.AcousticEchoCanceler? = null
     private var clapStopRunnable: Runnable? = null
+    private var duckedMediaVolume: Int = -1
 
     private fun startClapListener() {
         if (clapThread != null) return
@@ -631,6 +640,18 @@ class MotionDetectionService : Service() {
         clapRecord = rec
         try { rec.startRecording() } catch (_: Exception) {
             rec.release(); clapRecord = null; return
+        }
+
+        // Fail-safe: mute the camera feed's playback while we listen, so the
+        // baby's cry from this phone's speaker can't fake a double-clap.
+        // Cry DETECTION is unaffected (playback capture taps the stream
+        // before the volume control).
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (duckedMediaVolume < 0) {
+            duckedMediaVolume = try { am.getStreamVolume(AudioManager.STREAM_MUSIC) } catch (_: Exception) { -1 }
+            if (duckedMediaVolume >= 0) {
+                try { am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0) } catch (_: Exception) {}
+            }
         }
 
         val debug = prefs.getBoolean("clapDebugEnabled", false)
@@ -770,6 +791,11 @@ class MotionDetectionService : Service() {
     }
 
     private fun stopClapListener() {
+        if (duckedMediaVolume >= 0) {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            try { am.setStreamVolume(AudioManager.STREAM_MUSIC, duckedMediaVolume, 0) } catch (_: Exception) {}
+            duckedMediaVolume = -1
+        }
         clapThread?.interrupt()
         clapThread = null
         clapAec?.let { try { it.release() } catch (_: Exception) {} }
