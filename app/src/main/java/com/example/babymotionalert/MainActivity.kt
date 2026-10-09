@@ -202,19 +202,54 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.accessibilityButton).setOnClickListener {
-            Toast.makeText(
-                this,
-                "Find 'Baby Motion Alert' in the list and switch it on",
-                Toast.LENGTH_LONG
-            ).show()
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            if (isClickerEnabled()) {
+                Toast.makeText(
+                    this,
+                    "Already on \u2014 it will press Continue for you automatically",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                Toast.makeText(
+                    this,
+                    "Find 'Baby Motion Alert' in the list and switch it on",
+                    Toast.LENGTH_LONG
+                ).show()
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+            updateAccessibilityButton()
         }
+        updateAccessibilityButton()
 
         findViewById<Button>(R.id.testButton).setOnClickListener {
             startService(Intent(this, MotionDetectionService::class.java).apply {
                 action = MotionDetectionService.ACTION_TEST_ALARM
             })
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateAccessibilityButton()
+    }
+
+    private fun isClickerEnabled(): Boolean {
+        val enabled = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        val full = "$packageName/${ReconnectClickerService::class.java.name}"
+        val short = "$packageName/.ReconnectClickerService"
+        return enabled.split(':').any {
+            it.equals(full, ignoreCase = true) || it.equals(short, ignoreCase = true)
+        }
+    }
+
+    private fun updateAccessibilityButton() {
+        val btn = findViewById<Button>(R.id.accessibilityButton)
+        btn.text = if (isClickerEnabled())
+            "Auto-reconnect clicker: ON \u2713"
+        else
+            "Enable auto-reconnect clicker"
     }
 
     // slider 0..100  ->  percentX100 5..500 (log scale)
