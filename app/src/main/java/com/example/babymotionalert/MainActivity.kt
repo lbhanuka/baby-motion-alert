@@ -158,6 +158,22 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // ---- Clap sensitivity ----
+        val clapSensSeek = findViewById<SeekBar>(R.id.clapSensSeek)
+        val clapSensLabel = findViewById<TextView>(R.id.clapSensLabel)
+        val savedClapSens = prefs.getInt("clapSensitivity", 50)
+        clapSensSeek.progress = savedClapSens
+        clapSensLabel.text = clapSensLabelFor(savedClapSens)
+
+        clapSensSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
+                clapSensLabel.text = clapSensLabelFor(value)
+                prefs.edit().putInt("clapSensitivity", value).apply()
+            }
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+
         // ---- Clap debug recording ----
         val clapDebugSwitch = findViewById<Switch>(R.id.clapDebugSwitch)
         clapDebugSwitch.isChecked = prefs.getBoolean("clapDebugEnabled", false)
@@ -306,6 +322,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun soundLabelFor(value: Int): String {
         return "Sound sensitivity: $value/100 (higher = triggers on quieter sounds)"
+    }
+
+    private fun clapSensLabelFor(value: Int): String {
+        return "Clap sensitivity: $value/100 (lower = needs louder claps, cuts TV false positives)"
     }
 
     private fun snoozeLabelFor(minutes: Int): String {

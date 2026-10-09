@@ -70,7 +70,6 @@ class MotionDetectionService : Service() {
         var suppressUntil: Long = 0L
 
         // --- Double-clap snooze tuning ---
-        private const val CLAP_PEAK_MIN = 7000       // 16-bit peak a clap must exceed
         private const val CLAP_FLOOR_FACTOR = 3.0    // ...and this many times the ambient RMS floor
         private const val CLAP_GAP_MIN_MS = 180L     // two claps this far apart...
         private const val CLAP_GAP_MAX_MS = 1500L    // ...but no further -> snooze
@@ -613,6 +612,13 @@ class MotionDetectionService : Service() {
     private var clapStopRunnable: Runnable? = null
     private var duckedMediaVolume: Int = -1
 
+    /** Slider 0..100 (higher = more sensitive) -> required clap peak 15000 .. 3000. */
+    private fun clapPeakMin(): Int {
+        val s = getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getInt("clapSensitivity", 50)
+        return (15000.0 * (3000.0 / 15000.0).pow(s / 100.0)).toInt()
+    }
+
     private fun startClapListener() {
         if (clapThread != null) return
         val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -665,7 +671,7 @@ class MotionDetectionService : Service() {
             var detected = false
             val windowStart = System.currentTimeMillis()
             val pcm = if (debug) java.io.ByteArrayOutputStream() else null
-            val log = if (debug) StringBuilder("ms,rms,peak,floor,spike,edge\n") else null
+            val log = if (debug) StringBuilder("ms,rms,peak,floor,thr,spike,edge\n") else null
             val pcmCap = sr * 2 * 60 // at most 60 s of audio per window
 
             while (!Thread.currentThread().isInterrupted && clapRecord === rec) {
@@ -692,8 +698,9 @@ class MotionDetectionService : Service() {
                     }
                 }
 
+                val peakMin = clapPeakMin()
                 val isSpike = chunksSeen > 4 &&
-                    peak > CLAP_PEAK_MIN &&
+                    peak > peakMin &&
                     rms > floor * CLAP_FLOOR_FACTOR
                 if (!isSpike) floor = 0.9 * floor + 0.1 * rms // adapt floor on quiet chunks only
 
@@ -701,6 +708,7 @@ class MotionDetectionService : Service() {
                 log?.append(System.currentTimeMillis() - windowStart)?.append(',')
                     ?.append(rms.toInt())?.append(',')?.append(peak)?.append(',')
                     ?.append(floor.toInt())?.append(',')
+                    ?.append(peakMin)?.append(',')
                     ?.append(if (isSpike) 1 else 0)?.append(',')
                     ?.append(if (edge) 1 else 0)?.append('\n')
 
