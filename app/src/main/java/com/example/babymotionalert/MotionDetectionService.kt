@@ -619,21 +619,14 @@ class MotionDetectionService : Service() {
         val rec = try {
             @Suppress("MissingPermission")
             AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION, sr,
+                // VOICE_RECOGNITION: raw mic path, no noise suppression / speech AGC.
+                // (VOICE_COMMUNICATION's noise suppressor was erasing the claps.)
+                MediaRecorder.AudioSource.VOICE_RECOGNITION, sr,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
                 maxOf(minBuf, sr / 2) * 2
             )
         } catch (_: Exception) { null } ?: return
         if (rec.state != AudioRecord.STATE_INITIALIZED) { rec.release(); return }
-
-        // VOICE_COMMUNICATION + AEC cancels the alarm this phone is playing,
-        // so claps from the room stand out.
-        try {
-            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
-                clapAec = android.media.audiofx.AcousticEchoCanceler
-                    .create(rec.audioSessionId)?.apply { enabled = true }
-            }
-        } catch (_: Exception) {}
 
         clapRecord = rec
         try { rec.startRecording() } catch (_: Exception) {
