@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="reconnect_clicker_desc">Automatically presses \u0022Continue\u0022 when the baby cam app shows its \u0022Video will stop\u0022 dialog after a network interruption, and prevents that dialog from causing a false motion alarm.</string>
+</resources>

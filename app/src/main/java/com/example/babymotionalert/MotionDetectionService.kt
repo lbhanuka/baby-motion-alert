@@ -63,6 +63,11 @@ class MotionDetectionService : Service() {
         private const val FLASH_TOGGLE_MS = 250L       // red overlay blink rate during alarm
         private const val LONG_PRESS_MS = 600L         // hold the floating button this long = indefinite pause
 
+        /** While now < suppressUntil, detection ignores everything (set by ReconnectClickerService). */
+        @Volatile
+        @JvmStatic
+        var suppressUntil: Long = 0L
+
         // --- Sound detection tuning ---
         private const val AUDIO_SAMPLE_RATE = 16000
         private const val AUDIO_CHUNK_MS = 100         // analyse audio in 100 ms chunks
@@ -450,7 +455,7 @@ class MotionDetectionService : Service() {
                 if (n < 0) break
                 if (n == 0) continue
 
-                if (isSuspended()) { loudChunks = 0; continue }
+                if (isSuspended() || System.currentTimeMillis() < suppressUntil) { loudChunks = 0; continue }
 
                 var sum = 0.0
                 for (i in 0 until n) {
@@ -521,7 +526,7 @@ class MotionDetectionService : Service() {
         if (prev == null || prev.size != luma.size || framesSeen <= WARMUP_FRAMES) return
         if (isSuspended() || alarmActive) return
         val now = System.currentTimeMillis()
-        if (now < cooldownUntil) return
+        if (now < cooldownUntil || now < suppressUntil) return
 
         var changed = 0
         for (i in luma.indices) {

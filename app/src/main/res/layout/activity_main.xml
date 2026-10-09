@@ -114,6 +114,12 @@
         android:text="Stop monitoring" />
 
     <Button
+        android:id="@+id/accessibilityButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Enable auto-reconnect clicker" />
+
+    <Button
         android:id="@+id/testButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

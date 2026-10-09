@@ -201,6 +201,15 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "Status: stopped"
         }
 
+        findViewById<Button>(R.id.accessibilityButton).setOnClickListener {
+            Toast.makeText(
+                this,
+                "Find 'Baby Motion Alert' in the list and switch it on",
+                Toast.LENGTH_LONG
+            ).show()
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+
         findViewById<Button>(R.id.testButton).setOnClickListener {
             startService(Intent(this, MotionDetectionService::class.java).apply {
                 action = MotionDetectionService.ACTION_TEST_ALARM
